@@ -1,14 +1,26 @@
 stages:
-  build_dataset:
-    cmd: python scripts/build_dataset.py
+  build_features:
+    cmd: python scripts/build_features.py
     deps:
       - ${dataset.raw_dir}
-      - scripts/build_dataset.py
+      - scripts/build_features.py
+      - src/config.py
       - src/dataset.py
-      - src/preprocessing.py
+      - src/filtering.py
+      - src/windowing.py
+      - src/feature_extraction.py
+      - src/labeling.py
+      - src/pipeline.py
+      - src/signal_quality.py
     params:
+      - hardware
       - dataset
-      - preprocessing
+      - filtering
+      - windowing
+      - features
+      - normalization
+      - labeling
+      - signal_quality
     outs:
       - ${dataset.out_dir}
 
@@ -19,15 +31,16 @@ stages:
       - scripts/train.py
       - src
     params:
-      - model
-      - train
+      - decoder
+      - evaluation
     outs:
-      - ${train.out_dir}/best_model.pt
-      - ${train.out_dir}/probes
+      - ${evaluation.out_dir}/profiles
+      - ${evaluation.out_dir}/confusion.png
     metrics:
-      - ${train.out_dir}/metrics.json:
+      - ${evaluation.out_dir}/metrics.json:
           cache: false
     plots:
-      - ${train.out_dir}/history.csv:
+      - ${evaluation.out_dir}/calibration.csv:
           cache: false
-          x: epoch
+          x: seconds_per_class
+          y: accuracy
