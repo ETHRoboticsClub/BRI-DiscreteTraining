@@ -1,29 +1,74 @@
+# One section per module, parsed and validated by src/config.py.
+
+hardware:
+  fs: 2000                  # Hz
+  n_channels: 12
+  channel_names: null       # null = taken from the recordings
+  adc_range_uv: 11000       # ± µV (Delsys Trigno: ±11 mV)
+
 dataset:
-  raw_dir: data/raw/recordings
+  raw_dir: data/raw/ninapro_db2   # NinaPro DB2, see scripts/fetch_ninapro.py
   out_dir: data/processed/default
-  meta_keys: [subject, session, trial]
-  test: {session: [2]}      # recordings held out for the final test
-  window: 200               # samples after preprocessing
-  stride: 50
-  skip_start: 0.25          # seconds dropped at the start of each recording
+  reader: npz
+  meta_keys: [subject, exercise]
+  where: {exercise: [1]}    # recordings used: the 17 movements of exercise 1
+  classes: null             # class IDs kept, null = all
+  rest_class: 0
+  user_key: subject         # σ_rest, normalization and decoder are fitted per subject (one calibration profile each)
+  chunk_seconds: 10         # recordings are streamed through the pipeline like online
 
-preprocessing:              # arguments of src/preprocessing.py:preprocess
-  fs: 2048
-  bandpass: [20, 450]
+filtering:
+  highpass: 20              # Hz
+  lowpass: 450
+  order: 4
+  filter_type: butter
   notch: 50
-  downsample: 2
+  notch_q: 30
+  notch_harmonics: [100, 150]
+  mode: causal              # zero_phase only for offline analysis, never for a model that runs online
+  init: first_sample
 
-model:                      # arguments of src/model.py:Model
-  hidden: 32
-  layers: 3
-  kernel_size: 5
-  dropout: 0.1
+windowing:
+  window_ms: 200
+  step_ms: 50
 
-train:
+features:
+  names: [MAV, WL, WAMP, AR, MNF, MDF]
+  ar_order: 4
+  ar_method: burg           # burg | yule_walker
+  wamp_k: 3.0               # WAMP threshold = wamp_k * σ_rest
+  spectral_method: periodogram
+  spectral_taper: hann
+  spectral_band: null
+  log_amplitude: false
+  flatten: true
+
+normalization:
+  method: zscore            # identity | zscore
+  eps: 1.0e-6
+
+labeling:
+  strategy: last            # last | majority | centre
+  purity: 1.0
+  delay_ms: 0
+
+signal_quality:
+  enabled: [saturation, flatline, powerline, snr]
+  saturation_margin: 0.01
+  saturation: {warning: 0.001, bad: 0.01}
+  min_std: {warning: 2.0, bad: 0.5}
+  max_powerline_ratio: {warning: 0.3, bad: 1.0}
+  min_snr: {warning: 3.0, bad: 1.5}
+
+decoder:                    # lda (src/classifier.py), a src/decoders.py alias or a dotted sklearn class path
+  name: lda
+  params: {shrinkage: 0.1, priors: uniform}
+
+evaluation:
   out_dir: runs/default
-  val: {trial: [4]}         # taken out of the train recordings for model selection
-  epochs: 20
-  batch_size: 128
-  lr: 0.001
-  weight_decay: 0.0001
+  split: holdout            # holdout | leave_one_group_out
+  test: {trial: [2, 5]}     # holdout: repetitions 2 and 5 (the standard NinaPro split)
+  group_key: trial          # leave_one_group_out: one fold per repetition
+  conditions: []            # columns to report accuracy per value of, e.g. [exercise]
+  calibration_seconds: [2, 5, 10]  # accuracy when training on the first n seconds of every class
   seed: 0

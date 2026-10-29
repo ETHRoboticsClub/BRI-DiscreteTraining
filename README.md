@@ -1,105 +1,130 @@
-# emg2action — training
+# HRI — discrete training
 
-Train models that map forearm EMG to robotic arm actuator activations.
+Train gesture classifiers on forearm sEMG: filtering → windowing → hand-crafted features → normalization →
+decoder (LDA or any scikit-learn classifier). It holds the shared Group 2 modules and the Group 3 classifier, so
+the offline features match the calibration and online paths exactly.
 
-The repo holds **one model at a time**. To try something else, create a branch, change
-`src/model.py` (and `src/preprocessing.py` if needed), and keep it up to date with
-`git rebase origin/main`. Everything else (dataset, trainer, metrics, probes) is shared,
-so branches stay easy to compare and to merge.
+Continuous decoding (joint angles, TRR) lives in `HRI-ContinuousTraining`.
 
 ## Setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pre-commit install
-dvc pull
+python scripts/fetch_ninapro.py --subjects 1-10   # or dvc pull, once the data is pushed
 ```
 
 ## Structure
 
 ```
-params.yaml            all parameters
-dvc.yaml               pipeline: build_dataset -> train
+params.yaml                  all parameters, one section per module
+dvc.yaml                     pipeline: build_features -> train
 scripts/
-  build_dataset.py     raw recordings -> windows
-  train.py             your training script
+  fetch_ninapro.py           NinaPro DB2 -> data/raw/ninapro_db2 (recording format below)
+  build_features.py          recordings -> labeled feature windows, σ_rest and signal quality per recording
+  train.py                   evaluation protocol + one calibration profile per user
 src/
-  preprocessing.py     preprocess(emg, fs, ...): change it if your method needs it
-  model.py             Model: your model
-  dataset.py           recordings, windowing, train/val/test splits, loaders
-  trainer.py           train / evaluate (shared, do not fork)
-  metrics.py           regression metrics (shared)
-  probes.py            @probe decorators to monitor layers (shared)
-tests/                 end-to-end test on fake data
+  config.py                  params.yaml -> typed, validated config + config hash        (shared)
+  filtering.py               causal band-pass + notch, state per channel                   (shared)
+  windowing.py               ring buffer -> overlapping windows with end timestamps        (shared)
+  feature_extraction.py      feature registry: MAV, WL, WAMP, AR, MNF, MDF                  (shared)
+  normalization.py           identity / z-score, fitted on calibration or training data    (shared)
+  pipeline.py                Pipeline, Recording, FeatureBatch                             (shared)
+  signal_quality.py          saturation, flatline, power-line ratio, SNR -> ok/warning/bad (shared)
+  dataset.py                 file reader -> Recording                                      (offline)
+  labeling.py                per-sample labels -> one label per window + keep mask         (offline, calibration)
+  evaluation.py              splits, metrics, robustness, calibration effort               (offline)
+  classifier.py              shrinkage LDA with calibration adaptation, numpy only         (Group 3)
+  decoders.py                decoder factory: LDA or any scikit-learn classifier
+tests/                       end-to-end and unit tests on fake data
 ```
+
+The calibration (`calibration_collection.py`, `calibration_adaptation.py`) and online modules (`realtime_loop.py`,
+`monitoring.py`, `recorder.py`, `controller.py`, `force_control.py`, `hand_io.py`) run on the device and do not
+belong here; they import `src.pipeline`, `src.classifier` and the profiles written by `train.py`.
 
 ## Run
 
 ```bash
-dvc repro                         # build the dataset and train, outputs in runs/default/
-dvc metrics show                  # val and test metrics
-dvc plots show                    # training curves
-dvc exp run -S train.lr=3e-4      # try another parameter value, compare with: dvc exp show
+dvc repro                                  # features + train, outputs in runs/default/
+dvc metrics show                           # accuracy, macro-F1, per user, per condition, calibration curve
+dvc plots show                             # accuracy vs seconds of training data per class
+dvc exp run -S decoder.name=svm            # another decoder, compare with: dvc exp show
+dvc exp run -S 'features.names=[MAV,WL]'   # another feature set (rebuilds the features)
 ```
 
-or without DVC: `python scripts/build_dataset.py` then `python scripts/train.py`.
+or without DVC: `python scripts/build_features.py` then `python scripts/train.py`.
 
 ## Data
 
-Each recording is one `.npz` file in `data/raw/<name>/`:
+Each recording is one continuous `.npz` file in `data/raw/<name>/`:
 
-| key             | shape    | content                                          |
-|-----------------|----------|--------------------------------------------------|
-| `emg`           | [C, T]   | raw EMG                                          |
-| `fs`            | scalar   | sampling rate (Hz)                               |
-| `channel_names` | [C]      | electrode names                                  |
-| `targets`       | [D, T]   | actuator activations in [0, 1], aligned with emg |
-| `target_names`  | [D]      | actuator names                                   |
-| `meta_<key>`    | scalar   | int, for every key in `dataset.meta_keys`        |
+| key             | shape  | content                                               |
+|-----------------|--------|-------------------------------------------------------|
+| `emg`           | [C, T] | raw sEMG, float32, µV                                 |
+| `fs`            | scalar | sampling rate (Hz), must match `hardware.fs`          |
+| `channel_names` | [C]    | electrode names                                       |
+| `labels`        | [T]    | class ID per sample (cue), 0 = rest                   |
+| `label_names`   | [K]    | `label_names[class ID]`                               |
+| `trial`         | [T]    | trial (repetition) ID per sample                      |
+| `timestamps`    | [T]    | optional, seconds (default: sample index / fs)        |
+| `meta_<key>`    | scalar | int, for every key in `dataset.meta_keys`             |
 
-Add new data with `dvc add data/raw/<name> && git add data/raw/<name>.dvc && dvc push`.
-Splits use the metadata (`dataset.test`, `train.val`), never random windows, because windows overlap.
+Add new data with `dvc add data/raw/<name> && git add data/raw/<name>.dvc && dvc push`. Another file format only
+needs a reader in `READERS` of `src/dataset.py`.
 
-## Changing the model
+### NinaPro DB2
 
-1. Edit `Model` in `src/model.py`. It receives `(in_channels, out_dim, **params["model"])`
-   and maps `[batch, channels, window]` to `[batch, n_targets]`. Use only past samples.
-2. Put its hyperparameters in the `model:` section of `params.yaml`.
-3. Adapt `scripts/train.py` if needed (loss, optimizer...), always calling `src.trainer.train`.
-4. Run `pytest`.
+[NinaPro DB2](https://ninapro.hevs.ch/instructions/DB2.html), converted by `scripts/fetch_ninapro.py`:
 
-## Probes
+- `emg`: 12 Delsys electrodes at 2 kHz, converted from V to µV.
+- `labels`: `restimulus`, 0 = rest, 1-17 exercise 1, 18-40 exercise 2 (41-49 exercise 3 with `--exercises 1-3`).
+- One file per subject and exercise (`data/raw/ninapro_db2/s<subject>/e<exercise>.npz`); `trial` is the repetition.
+- Default: exercise 1, one model per subject, test on repetitions 2 and 5 (the standard NinaPro split).
 
-Decorate the methods of your model whose outputs you want to monitor. The trainer computes
-the metrics on a validation subset every `every` epochs and on the best model:
+## Processing
 
-```python
-from functools import partial
-from src.probes import probe, saturation
+- **Same code everywhere.** `build_features.py` streams every recording through `Pipeline.process` in
+  `dataset.chunk_seconds` chunks, exactly like the online loop. The filter is causal (`filtering.mode: zero_phase`
+  is for analysis only).
+- **Windows** cover `[kS, kS + L)` and are labeled by `labeling.py` (`last` sample by default, the causal choice).
+  Windows below `labeling.purity`, spanning two trials, inside the filter transient or with a dead channel are
+  dropped.
+- **σ_rest** per user is the std of the filtered rest samples (online it comes from calibration). WAMP uses it
+  as a relative threshold and signal quality uses it for SNR.
+- **Splits** use trials or sessions (`evaluation.split`), never random windows, because windows overlap.
+  Normalization and decoder are fitted on the training split only.
+- **Config hash**: everything that changes the features (`hardware`, `filtering`, `windowing`, `features`,
+  `normalization`) is hashed. It is stored with the features, metrics and profiles, and `Pipeline.load_profile`
+  rejects a profile made with another config.
 
+## Decoders
 
-@probe("embedding", "linear_probe", "effective_rank", "dead_units")
-@probe("embedding", "tsne", every=5)
-def embed(self, x): ...
+`decoder.name` is `lda` (our numpy LDA in `src/classifier.py`, with `adapt` for calibration), an alias of
+`src/decoders.py` (`sklearn_lda`, `qda`, `logreg`, `svm`, `linear_svm`, `knn`, `random_forest`, `extra_trees`,
+`gradient_boosting`, `mlp`) or any dotted class path. `decoder.params` are passed to the constructor:
 
-
-@probe("hidden", partial(saturation, low=-1, high=1))  # metric with options
-def recur(self, x): ...
+```yaml
+decoder:
+  name: sklearn.ensemble.ExtraTreesClassifier
+  params: {n_estimators: 300, min_samples_leaf: 2}
 ```
 
-| layer            | metrics                                                                |
-|------------------|------------------------------------------------------------------------|
-| any              | `activation_stats`, `dead_units`, `effective_rank`, `linear_probe`, `target_cka`, `pca`, `tsne` |
-| convolution      | `channel_activity`, `partial(dead_units, unit_axis=1)`, `partial(temporal_dynamics, time_axis=-1)` |
-| recurrent        | `temporal_dynamics`, `partial(saturation, low=-1, high=1)`             |
-| sigmoid / output | `saturation`                                                           |
-| attention        | `attention_entropy`                                                    |
+The only interface needed is `fit(X, y)`, `predict_proba(X)` and `classes_`. Classifiers without `predict_proba`
+are wrapped in `CalibratedClassifierCV`.
 
-A custom metric is any function `(values, targets) -> dict` (or a matplotlib `Figure`).
-Results go to `runs/<name>/probes/`: `scalars.csv`, one plot per probe, and the figures.
+## Adding a feature
 
-## Metrics
+Write a function `windows [N, C, L] -> [N, C, k]` in `src/feature_extraction.py` and register it in `REGISTRY`
+with the names of its `k` values. It can then be listed in `features.names`; its parameters go in `FeaturesConfig`.
 
-`r2`, `mae`, `mse`, `pearson` and `jitter_ratio` (how much the prediction moves compared to
-the target: above 1, the arm shakes). Compare models on the `test` metrics of `metrics.json`.
+## Outputs
+
+`runs/default/`:
+
+- `metrics.json`: `test` (accuracy, macro-F1, recall per class, decision switches per second while a gesture is
+  held), `per_user`, `conditions` (accuracy and drop per value of `evaluation.conditions`), `calibration`
+  (accuracy vs seconds of training data per class), number of bad channels, config hash.
+- `confusion.png`, `calibration.csv`.
+- `profiles/<user>.joblib`: calibration profile with σ_rest, normalization statistics, the fitted decoder, feature
+  and label names, config hash and validation accuracy. Load it with `Pipeline(cfg, profile=...)`.

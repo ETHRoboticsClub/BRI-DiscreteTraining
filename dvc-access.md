@@ -26,7 +26,7 @@ curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
 unzip awscliv2.zip && sudo ./aws/install
 
 # the project, which installs DVC with S3 support
-git clone <repo-url> && cd HRI-movement-decoder
+git clone <repo-url> && cd HRI-DiscreteTraining
 pip install -e ".[dev]"
 ```
 
@@ -99,20 +99,20 @@ git push
 3. Optional: run `dvc install` once in the repo. It adds git hooks so `git push` also runs `dvc push`, and
    `git checkout` also updates the data.
 
-## Training on a GPU (SkyPilot)
+## Training on a cloud machine (SkyPilot)
 
-`sky/train.yaml` runs the same pipeline (`dvc pull` → `dvc repro` → `dvc push`) on an AWS A10G machine.
+`sky/train.yaml` runs the same pipeline (`dvc pull` → `dvc repro` → `dvc push`) on an AWS machine with 16+ CPUs.
 It copies your `~/.aws/credentials` to the machine, so step 2 above must be done first.
 
 ```bash
-sky launch -c hri-gpu-<yourname> sky/train.yaml --env SMOKE_TEST=1   # once: create the machine + check GPU/S3
-sky exec hri-gpu-<yourname> sky/train.yaml                           # each run: syncs your local code, trains
-sky/fetch.sh hri-gpu-<yourname>                                      # brings dvc.lock + metrics back, pulls the model
+sky launch -c hri-cpu-<yourname> sky/train.yaml --env SMOKE_TEST=1   # once: create the machine + check S3
+sky exec hri-cpu-<yourname> sky/train.yaml                           # each run: syncs your local code, trains
+sky/fetch.sh hri-cpu-<yourname>                                      # brings dvc.lock + metrics back, pulls the model
 git add dvc.lock && git commit -m "..." && git push
 ```
 
-The machine stops by itself after 30 idle minutes (`sky start hri-gpu-<yourname>` to resume, packages stay installed).
-It costs about $1/h while running. Use `sky down hri-gpu-<yourname>` when you won't need it for a while.
+The machine stops by itself after 30 idle minutes (`sky start hri-cpu-<yourname>` to resume, packages stay installed).
+It costs well under $1/h while running. Use `sky down hri-cpu-<yourname>` when you won't need it for a while.
 Change parameters by editing `params.yaml` locally before `sky exec`.
 
 ## Troubleshooting
