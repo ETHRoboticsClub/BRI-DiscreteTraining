@@ -2,15 +2,22 @@
 
 params.yaml:
     decoder: {name: svm, params: {C: 10}}
+    decoder: {name: mlp, params: {hidden: [128, 128]}}     # src/nn.py
     decoder: {name: sklearn.ensemble.ExtraTreesClassifier, params: {n_estimators: 300}}
 """
 
 import importlib
+import inspect
 
 from src.classifier import LDA
+from src.nn import CNN, MLP, NNLDA, LDAStack
 
 ALIASES = {
     "lda": LDA,
+    "mlp": MLP,  # src/nn.py: trained with torch, numpy inference
+    "lda_stack": LDAStack,
+    "nn_lda": NNLDA,
+    "cnn": CNN,
     "sklearn_lda": "sklearn.discriminant_analysis.LinearDiscriminantAnalysis",
     "qda": "sklearn.discriminant_analysis.QuadraticDiscriminantAnalysis",
     "logreg": "sklearn.linear_model.LogisticRegression",
@@ -20,7 +27,7 @@ ALIASES = {
     "random_forest": "sklearn.ensemble.RandomForestClassifier",
     "extra_trees": "sklearn.ensemble.ExtraTreesClassifier",
     "gradient_boosting": "sklearn.ensemble.HistGradientBoostingClassifier",
-    "mlp": "sklearn.neural_network.MLPClassifier",
+    "sklearn_mlp": "sklearn.neural_network.MLPClassifier",
 }
 DEFAULTS = {  # so that predict_proba exists or the defaults are sensible for EMG features
     "sklearn_lda": {"solver": "lsqr", "shrinkage": "auto"},
@@ -42,7 +49,9 @@ def resolve(name):
 def make_decoder(cfg, seed=None):
     cls = resolve(cfg.name)
     params = {**DEFAULTS.get(cfg.name, {}), **cfg.params}
-    if seed is not None and "random_state" in getattr(cls, "_get_param_names", lambda: [])():
+    signature = inspect.signature(cls).parameters
+    takes_seed = "random_state" in signature or any(p.kind == p.VAR_KEYWORD for p in signature.values())
+    if seed is not None and takes_seed:
         params.setdefault("random_state", seed)
     decoder = cls(**params)
     if not hasattr(decoder, "predict_proba"):  # e.g. LinearSVC: calibrated probabilities

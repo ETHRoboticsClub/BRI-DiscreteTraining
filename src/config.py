@@ -57,7 +57,8 @@ class FeaturesConfig:
     spectral_method: str = "periodogram"  # periodogram | welch
     spectral_taper: str = "hann"
     spectral_band: list | None = None  # [low, high] Hz, None = all frequencies
-    log_amplitude: bool = False  # log of MAV and WL
+    raw_samples: int = 40  # RAW: samples per channel and window
+    log_amplitude: bool = False  # log of MAV, RMS and WL
     flatten: bool = True
 
 
@@ -94,6 +95,8 @@ class DecoderConfig:
 @dataclass
 class EvaluationConfig:
     out_dir: str = "runs/default"
+    regime: str = "per_user"  # per_user | pooled | loso (leave one subject out)
+    normalize: str = "user"  # pooled / loso: user (each user's own statistics) | global (one for everyone)
     split: str = "holdout"  # holdout | leave_one_group_out
     test: dict | None = None  # holdout: windows held out for the test, e.g. {trial: [2, 5]}
     group_key: str = "trial"  # leave_one_group_out: one fold per value of this column
@@ -153,8 +156,12 @@ def from_dict(params):
     return cfg
 
 
-def load_config(path="params.yaml"):
-    return from_dict(yaml.safe_load(Path(path).read_text()))
+def load_config(path="params.yaml", overrides=None):
+    """overrides: {section: {key: value}}, merged into the file's sections (for notebooks and sweeps)."""
+    params = yaml.safe_load(Path(path).read_text())
+    for section, values in (overrides or {}).items():
+        params[section] = {**(params.get(section) or {}), **values}
+    return from_dict(params)
 
 
 def validate(cfg):
@@ -176,6 +183,11 @@ def validate(cfg):
         errors.append(f"windowing: need 0 < step_ms ({win.step_ms}) <= window_ms ({win.window_ms})")
     if "AR" in feat.names and cfg.window_samples <= feat.ar_order:
         errors.append(f"window of {cfg.window_samples} samples is too short for AR order {feat.ar_order}")
+    if "RAW" in feat.names and not 0 < feat.raw_samples <= cfg.window_samples:
+        errors.append(f"features.raw_samples {feat.raw_samples} must be in 1..{cfg.window_samples} (window samples)")
+    band = feat.spectral_band
+    if band is not None and not (len(band) == 2 and 0 <= band[0] < band[1] <= nyquist):
+        errors.append(f"features.spectral_band {band} must be [low, high] with 0 <= low < high <= fs/2 = {nyquist} Hz")
     missing = [n for n in feat.names if n not in REGISTRY]
     if missing:
         errors.append(f"features.names: unknown {missing}, available: {sorted(REGISTRY)}")
@@ -185,6 +197,12 @@ def validate(cfg):
         errors.append(f"labeling.strategy must be last, majority or centre, not {cfg.labeling.strategy}")
     if cfg.evaluation.split not in ("holdout", "leave_one_group_out"):
         errors.append(f"evaluation.split must be holdout or leave_one_group_out, not {cfg.evaluation.split}")
+    if cfg.evaluation.regime not in ("per_user", "pooled", "loso"):
+        errors.append(f"evaluation.regime must be per_user, pooled or loso, not {cfg.evaluation.regime}")
+    if cfg.evaluation.normalize not in ("user", "global"):
+        errors.append(f"evaluation.normalize must be user or global, not {cfg.evaluation.normalize}")
+    if cfg.evaluation.regime == "loso" and not cfg.dataset.user_key:
+        errors.append("evaluation.regime loso needs dataset.user_key")
     if hw.channel_names is not None and len(hw.channel_names) != hw.n_channels:
         errors.append(f"hardware: {len(hw.channel_names)} channel_names for {hw.n_channels} channels")
     if errors:

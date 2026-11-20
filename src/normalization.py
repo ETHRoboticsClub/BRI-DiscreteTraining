@@ -15,6 +15,7 @@ class Normalizer:
     def fit(self, X, feature_names, config_hash=None):
         X = np.asarray(X, dtype=np.float64)
         self.mean, self.std = X.mean(axis=0), X.std(axis=0)
+        self.std[self.std == 0] = 1.0  # a constant feature is centred, not blown up at test time
         self.feature_names, self.config_hash = list(feature_names), config_hash
         return self
 

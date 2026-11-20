@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import subprocess
 import sys
@@ -15,7 +16,8 @@ from src.normalization import Normalizer
 from src.pipeline import Pipeline, Recording
 
 ROOT = Path(__file__).parents[1]
-PARAMS = yaml.safe_load((ROOT / "params.yaml").read_text())
+PARAMS = yaml.safe_load((ROOT / "configs" / "ninapro_db2.yaml").read_text())  # the fake recordings are DB2-like
+DB5 = yaml.safe_load((ROOT / "params.yaml").read_text())
 
 
 def config(**overrides):
@@ -106,6 +108,25 @@ def test_normalization_rejects_other_features():
         Normalizer(config().normalization).load_state_dict(norm.state_dict(), ["a", "c"])
 
 
+def test_db5_config_at_200_hz():
+    cfg = from_dict(DB5)
+    assert (cfg.hardware.fs, cfg.window_samples, cfg.step_samples) == (200, 40, 10)
+    rng = np.random.default_rng(2)
+    rec = Recording(rng.standard_normal((16, 2000)).astype(np.float32) * 5, 200.0, [f"c{i}" for i in range(16)])
+    pipe = Pipeline(cfg, rec.channel_names)
+    batch = pipe.process_recording(rec, chunk_seconds=1.3)
+    assert batch.features.shape == ((2000 - 40) // 10 + 1, 16 * 3) and np.isfinite(batch.features).all()
+    with pytest.raises(ConfigError, match="spectral_band"):
+        from_dict({**DB5, "features": {**DB5["features"], "spectral_band": [20, 450]}})
+
+
+def test_rms_feature():
+    from src.feature_extraction import rms
+
+    x = np.array([[[3.0, -3.0, 3.0, -3.0]], [[1.0, 1.0, 1.0, 1.0]]], dtype=np.float32)
+    assert rms(x).ravel().tolist() == [3.0, 1.0]
+
+
 def test_config_validation():
     with pytest.raises(ConfigError, match="fs/2"):
         config(filtering={"lowpass": 1200})
@@ -115,11 +136,43 @@ def test_config_validation():
     assert config().hash == config(decoder={"name": "svm"}).hash
 
 
-@pytest.mark.parametrize("decoder", [{"name": "lda"}, {"name": "random_forest", "params": {"n_estimators": 20}}])
-def test_build_and_train(tmp_path, decoder):
+@pytest.mark.parametrize("regime", ["per_user", "pooled", "loso"])
+def test_experiment_masks(regime):
+    from src.evaluation import experiments
+
+    cfg = config(evaluation={"regime": regime})
+    names = ["subject", "exercise", "trial", "recording"]
+    columns = np.array([[s, 1, t, s] for s in (1, 2, 3) for t in range(1, 7) for _ in range(4)])
+    runs = experiments(columns, names, cfg)
+    assert len(runs) == (1 if regime == "pooled" else 3)
+    for _, train, test, user in runs:
+        assert not (train & test).any()
+        assert set(columns[test, 2]) == {2, 5}  # the holdout trials of the config
+        if regime == "loso":
+            assert set(columns[train, 0]) == {1, 2, 3} - {user} and set(columns[test, 0]) == {user}
+        if regime == "per_user":
+            assert set(columns[train | test, 0]) == {user}
+
+
+@pytest.mark.parametrize(
+    "decoder, regime",
+    [
+        ({"name": "lda"}, "per_user"),
+        ({"name": "random_forest", "params": {"n_estimators": 20}}, "per_user"),
+        ({"name": "lda"}, "pooled"),
+        ({"name": "lda"}, "loso"),
+        pytest.param(
+            {"name": "mlp", "params": {"max_epochs": 20, "adapt_epochs": 5}},
+            "loso",
+            marks=pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="needs the nn extra"),
+        ),
+    ],
+)
+def test_build_and_train(tmp_path, decoder, regime):
     params = json.loads(json.dumps(PARAMS))
     params["dataset"]["where"] = None
     params["decoder"] = decoder
+    params["evaluation"]["regime"] = regime
     params["evaluation"]["conditions"] = ["subject"]
     params["evaluation"]["calibration_seconds"] = [0.5, 1]
     (tmp_path / "params.yaml").write_text(yaml.safe_dump(params))
@@ -130,8 +183,11 @@ def test_build_and_train(tmp_path, decoder):
 
     out = tmp_path / params["evaluation"]["out_dir"]
     metrics = json.loads((out / "metrics.json").read_text())
-    assert metrics["test"]["accuracy"] > 0.8
-    assert set(metrics["per_user"]) == {"1", "2"} and set(metrics["calibration"]) == {"0.5", "1"}
+    if regime != "loso":  # every fake subject has its own random channel patterns: nothing transfers
+        assert metrics["test"]["accuracy"] > 0.8 and metrics["test"]["balanced_accuracy"] > 0.8
+    assert set(metrics["per_user"]) == {"1", "2"}
+    assert set(metrics["calibration"]) == (set() if regime == "pooled" else {"0.5", "1"})
+    assert 0 < metrics["latency_us"]["decoder"] < 10_000
     assert (out / "confusion.png").exists()
     profile = joblib.load(out / "profiles" / "subject1.joblib")
     pipe = Pipeline(from_dict(params), [f"emg_{i + 1}" for i in range(12)])
@@ -139,3 +195,49 @@ def test_build_and_train(tmp_path, decoder):
     emg, _, _ = fake_recording(np.random.default_rng(5), reps=1)
     batch = pipe.process(emg[:, :4000])
     assert profile["decoder"].predict_proba(batch.features).shape == (len(batch), 4)
+
+
+def blobs(rng, classes=4, n=300, d=12):
+    centres = rng.normal(0, 2, (classes, d))
+    y = np.repeat(np.arange(classes), n)
+    return (centres[y] + rng.normal(0, 1, (len(y), d))).astype(np.float32), y
+
+
+@pytest.mark.parametrize("name", ["mlp", "lda_stack", "nn_lda", "cnn"])
+def test_nn_decoders(name):
+    torch = pytest.importorskip("torch")
+    from src.decoders import make_decoder
+
+    rng = np.random.default_rng(0)
+    X, y = blobs(rng, d=4 * 10)  # cnn: 4 channels x 10 samples
+    params = {"max_epochs": 30, "patience": 5, "adapt_epochs": 5}
+    if name == "cnn":
+        params["channels"] = 4
+    decoder = make_decoder(config(decoder={"name": name, "params": params}).decoder, seed=0).fit(X, y + 1)
+    proba = decoder.predict_proba(X)
+    assert proba.shape == (len(y), 4) and np.allclose(proba.sum(axis=1), 1, atol=1e-5)
+    assert (decoder.classes_[proba.argmax(axis=1)] == y + 1).mean() > 0.8
+    decoder.adapt(X[::10] + 0.1, y[::10] + 1)
+    assert decoder.predict_proba(X).shape == (len(y), 4)
+    with pytest.raises(ValueError):
+        decoder.adapt(X[:5], np.full(5, 99))
+    if name in ("mlp", "cnn"):  # the numpy inference equals the torch module
+        module = decoder._new_module(X.shape[1])
+        module.load_state_dict({k: torch.from_numpy(v) for k, v in decoder.weights.items()})
+        with torch.no_grad():
+            expected = module.eval()(torch.from_numpy(X)).numpy()
+        np.testing.assert_allclose(decoder.decision_function(X), expected, rtol=1e-4, atol=1e-4)
+        clone = type(decoder)(**({"channels": 4} if name == "cnn" else {})).set_params(decoder.get_params())
+        np.testing.assert_allclose(clone.predict_proba(X), decoder.predict_proba(X))
+
+
+def test_raw_feature_and_validation_blocks():
+    from src.feature_extraction import raw
+    from src.nn import validation_blocks
+
+    x = np.arange(2 * 3 * 40, dtype=np.float32).reshape(2, 3, 40)
+    assert np.array_equal(raw(x, raw_samples=40), x) and raw(x, raw_samples=5).shape == (2, 3, 5)
+    t = np.repeat([0, 1], 400)
+    val = validation_blocks(t, 0.25, block=40)
+    assert val.sum() == 160 and all(val[t == c].sum() == 80 for c in (0, 1))  # blocks 3 and 7 of 10 per class
+    assert (np.diff(np.flatnonzero(val)[:40]) == 1).all()  # contiguous blocks

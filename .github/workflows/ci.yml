@@ -15,7 +15,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,nn]" --extra-index-url https://download.pytorch.org/whl/cpu
       - name: Lint
         run: |
           ruff check .

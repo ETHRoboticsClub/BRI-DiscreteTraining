@@ -18,12 +18,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.5"]
+nn = ["torch>=2.3"]  # training the src/nn.py decoders; their inference is numpy only
+notebook = ["jupyterlab>=4", "pandas>=2"]
 
 [tool.setuptools.packages.find]
 include = ["src*"]
 
 [tool.ruff]
 line-length = 120
+extend-exclude = ["notebooks/0[1-5]_*.ipynb"]  # the MATLAB port, kept as the reference
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B"]

@@ -1,0 +1,79 @@
+# One section per module, parsed and validated by src/config.py.
+# NinaPro DB5 (two Myo armbands, 16 channels, 200 Hz), the setup of the MATLAB / notebook baseline (notebooks/01-05).
+# Other datasets: configs/*.yaml, passed with --params.
+
+hardware:
+  fs: 200                   # Hz
+  n_channels: 16
+  channel_names: null       # null = taken from the recordings
+  adc_range_uv: 128         # ± raw Myo units (int8), DB5 is not in µV
+
+dataset:
+  raw_dir: data/raw/ninapro_db5   # python scripts/fetch_ninapro.py --db 5 --exercises 1
+  out_dir: data/processed/default
+  reader: npz
+  meta_keys: [subject, exercise]
+  where: {exercise: [1]}    # the 12 finger movements of exercise 1
+  classes: null             # class IDs kept, null = all
+  rest_class: 0
+  user_key: subject         # σ_rest and normalization per subject; per_user regime: also the decoder
+  chunk_seconds: 10         # recordings are streamed through the pipeline like online
+
+filtering:
+  highpass: 20              # Hz; below Nyquist (100 Hz), so no low-pass
+  lowpass: null
+  order: 4
+  filter_type: butter
+  notch: 50
+  notch_q: 30
+  notch_harmonics: []       # 100 Hz is Nyquist
+  mode: causal              # zero_phase only for offline analysis, never for a model that runs online
+  init: first_sample
+
+windowing:
+  window_ms: 200            # 40 samples
+  step_ms: 50               # 10 samples
+
+features:
+  names: [MAV, RMS, WL]     # the baseline's features
+  ar_order: 4
+  ar_method: burg           # burg | yule_walker
+  wamp_k: 3.0               # WAMP threshold = wamp_k * σ_rest
+  spectral_method: periodogram
+  spectral_taper: hann
+  spectral_band: null
+  raw_samples: 40            # RAW (raw windows for the cnn decoder): samples per channel
+  log_amplitude: false
+  flatten: true
+
+normalization:
+  method: zscore            # identity | zscore
+  eps: 1.0e-6
+
+labeling:
+  strategy: last            # last | majority | centre
+  purity: 1.0
+  delay_ms: 0
+
+signal_quality:             # thresholds in raw Myo units
+  enabled: [saturation, flatline, powerline, snr]
+  saturation_margin: 0.01
+  saturation: {warning: 0.001, bad: 0.01}
+  min_std: {warning: 0.5, bad: 0.1}
+  max_powerline_ratio: {warning: 0.3, bad: 1.0}
+  min_snr: {warning: 3.0, bad: 1.5}
+
+decoder:                    # lda (src/classifier.py), a src/decoders.py alias or a dotted sklearn class path
+  name: lda
+  params: {shrinkage: 0.1, priors: uniform}
+
+evaluation:
+  out_dir: runs/default
+  regime: per_user          # per_user | pooled (one decoder for all users) | loso (leave one subject out)
+  normalize: user           # pooled / loso: user (each user's own statistics, labels unused) | global
+  split: holdout            # holdout | leave_one_group_out
+  test: {trial: [5, 6]}     # holdout: repetitions 5 and 6, train on 1-4 (the baseline's split)
+  group_key: trial          # leave_one_group_out: one fold per repetition
+  conditions: []            # columns to report accuracy per value of, e.g. [exercise]
+  calibration_seconds: [2, 5, 10]  # accuracy when training on the first n seconds of every class
+  seed: 0

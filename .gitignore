@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 data/external/
+runs/notebooks/
+data/processed/raw/

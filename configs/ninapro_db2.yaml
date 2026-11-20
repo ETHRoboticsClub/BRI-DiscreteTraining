@@ -1,4 +1,4 @@
-# One section per module, parsed and validated by src/config.py.
+# NinaPro DB2 (12 Delsys electrodes, 2 kHz). Use with --params configs/ninapro_db2.yaml.
 
 hardware:
   fs: 2000                  # Hz
@@ -40,6 +40,7 @@ features:
   spectral_method: periodogram
   spectral_taper: hann
   spectral_band: null
+  raw_samples: 40            # RAW (raw windows for the cnn decoder): samples per channel
   log_amplitude: false
   flatten: true
 
@@ -66,6 +67,8 @@ decoder:                    # lda (src/classifier.py), a src/decoders.py alias o
 
 evaluation:
   out_dir: runs/default
+  regime: per_user          # per_user | pooled (one decoder for all users) | loso (leave one subject out)
+  normalize: user           # pooled / loso: user (each user's own statistics, labels unused) | global
   split: holdout            # holdout | leave_one_group_out
   test: {trial: [2, 5]}     # holdout: repetitions 2 and 5 (the standard NinaPro split)
   group_key: trial          # leave_one_group_out: one fold per repetition

@@ -3,6 +3,7 @@
 σ_rest (for WAMP and SNR) is estimated per user from the rest samples of their recordings, as calibration would.
 """
 
+import argparse
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -39,8 +40,7 @@ def estimate_sigma_rest(cfg):
     return sigma
 
 
-def main():
-    cfg = load_config()
+def build(cfg):
     out = Path(cfg.dataset.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     sigma_rest = estimate_sigma_rest(cfg)
@@ -106,4 +106,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--params", default="params.yaml", help="e.g. configs/ninapro_db2.yaml")
+    build(load_config(parser.parse_args().params))

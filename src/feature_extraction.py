@@ -12,6 +12,10 @@ def mav(x, **_):
     return np.abs(x).mean(axis=-1, keepdims=True)
 
 
+def rms(x, **_):
+    return np.sqrt((x.astype(np.float64) ** 2).mean(axis=-1, keepdims=True)).astype(np.float32)
+
+
 def wl(x, **_):
     return np.abs(np.diff(x, axis=-1)).sum(axis=-1, keepdims=True)
 
@@ -45,6 +49,12 @@ def ar(x, ar_order=4, ar_method="burg", **_):
     return (-a[..., 1:]).astype(np.float32)
 
 
+def raw(x, raw_samples=40, **_):
+    """The window itself, raw_samples points per channel (picked evenly), for decoders that learn their own features."""
+    idx = np.linspace(0, x.shape[-1] - 1, raw_samples).round().astype(int)
+    return x[..., idx].astype(np.float32)
+
+
 def power_spectrum(x, fs, spectral_method="periodogram", spectral_taper="hann", spectral_band=None, **_):
     if spectral_method == "welch":
         freqs, p = signal.welch(x, fs, window=spectral_taper, nperseg=min(256, x.shape[-1]), axis=-1)
@@ -75,13 +85,15 @@ def mdf(x, fs, **kw):
 # name -> (function, names of its k values per channel)
 REGISTRY = {
     "MAV": (mav, lambda p: ["MAV"]),
+    "RMS": (rms, lambda p: ["RMS"]),
     "WL": (wl, lambda p: ["WL"]),
     "WAMP": (wamp, lambda p: ["WAMP"]),
     "AR": (ar, lambda p: [f"AR{i + 1}" for i in range(p["ar_order"])]),
     "MNF": (mnf, lambda p: ["MNF"]),
     "MDF": (mdf, lambda p: ["MDF"]),
+    "RAW": (raw, lambda p: [f"s{i}" for i in range(p["raw_samples"])]),
 }
-AMPLITUDE = {"MAV", "WL"}
+AMPLITUDE = {"MAV", "RMS", "WL"}
 
 
 class FeatureExtractor:

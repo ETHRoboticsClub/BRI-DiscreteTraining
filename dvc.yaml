@@ -43,4 +43,4 @@ stages:
       - ${evaluation.out_dir}/calibration.csv:
           cache: false
           x: seconds_per_class
-          y: accuracy
+          y: [accuracy, balanced_accuracy]

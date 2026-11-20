@@ -11,23 +11,24 @@ Continuous decoding (joint angles, TRR) lives in `HRI-ContinuousTraining`.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python scripts/fetch_ninapro.py --subjects 1-10   # or dvc pull, once the data is pushed
+python scripts/fetch_ninapro.py --db 5 --subjects 1-10 --exercises 1   # or dvc pull, once the data is pushed
 ```
 
 ## Structure
 
 ```
-params.yaml                  all parameters, one section per module
+params.yaml                  all parameters, one section per module (NinaPro DB5, 200 Hz)
+configs/                     other datasets, e.g. ninapro_db2.yaml (2 kHz), passed with --params
 dvc.yaml                     pipeline: build_features -> train
 scripts/
-  fetch_ninapro.py           NinaPro DB2 -> data/raw/ninapro_db2 (recording format below)
+  fetch_ninapro.py           NinaPro DB2 / DB5 -> data/raw/ninapro_db<n> (recording format below)
   build_features.py          recordings -> labeled feature windows, σ_rest and signal quality per recording
   train.py                   evaluation protocol + one calibration profile per user
 src/
   config.py                  params.yaml -> typed, validated config + config hash        (shared)
   filtering.py               causal band-pass + notch, state per channel                   (shared)
   windowing.py               ring buffer -> overlapping windows with end timestamps        (shared)
-  feature_extraction.py      feature registry: MAV, WL, WAMP, AR, MNF, MDF                  (shared)
+  feature_extraction.py      feature registry: MAV, RMS, WL, WAMP, AR, MNF, MDF            (shared)
   normalization.py           identity / z-score, fitted on calibration or training data    (shared)
   pipeline.py                Pipeline, Recording, FeatureBatch                             (shared)
   signal_quality.py          saturation, flatline, power-line ratio, SNR -> ok/warning/bad (shared)
@@ -35,7 +36,9 @@ src/
   labeling.py                per-sample labels -> one label per window + keep mask         (offline, calibration)
   evaluation.py              splits, metrics, robustness, calibration effort               (offline)
   classifier.py              shrinkage LDA with calibration adaptation, numpy only         (Group 3)
-  decoders.py                decoder factory: LDA or any scikit-learn classifier
+  decoders.py                decoder factory: LDA, the NN decoders or any scikit-learn classifier
+  nn.py                      NN decoders (mlp, lda_stack, nn_lda, cnn): torch training, numpy inference
+  report.py                  notebook helpers: every regime, saved summaries, plots
 tests/                       end-to-end and unit tests on fake data
 ```
 
@@ -53,7 +56,18 @@ dvc exp run -S decoder.name=svm            # another decoder, compare with: dvc 
 dvc exp run -S 'features.names=[MAV,WL]'   # another feature set (rebuilds the features)
 ```
 
-or without DVC: `python scripts/build_features.py` then `python scripts/train.py`.
+`evaluation.regime` sets who the decoder is trained on: `per_user` (one decoder per subject, default), `pooled` (one
+for everyone, tested on their held-out repetitions) or `loso` (leave one subject out; its calibration curve adapts the
+decoder with the first n seconds per class of the new subject). `evaluation.normalize: user | global` sets whether
+pooled / loso z-score each subject with their own statistics. `metrics.json` reports balanced accuracy next to
+accuracy (rest is ~60 % of the windows) and `latency_us` (features per step, decoder per decision).
+
+Notebooks (`pip install -e ".[notebook]"`): `01`-`05` are the MATLAB port of the baseline, kept as the reference;
+`10_db5_lda_baseline` runs it through `src/` for every regime, `11`-`14` the NN decoders, `15_compare` all of them
+(run in order: each saves its summary to `runs/notebooks/`).
+
+or without DVC: `python scripts/build_features.py` then `python scripts/train.py`. Both take `--params`
+(default `params.yaml`), e.g. `--params configs/ninapro_db2.yaml`.
 
 ## Data
 
@@ -73,7 +87,16 @@ Each recording is one continuous `.npz` file in `data/raw/<name>/`:
 Add new data with `dvc add data/raw/<name> && git add data/raw/<name>.dvc && dvc push`. Another file format only
 needs a reader in `READERS` of `src/dataset.py`.
 
-### NinaPro DB2
+### NinaPro DB5 (default)
+
+[NinaPro DB5](https://ninapro.hevs.ch/instructions/DB5.html), converted by `scripts/fetch_ninapro.py --db 5`:
+
+- `emg`: 16 channels (two Myo armbands) at 200 Hz, raw Myo units (int8 range, not µV).
+- `labels`: `restimulus` offset per exercise, 0 = rest, 1-12 exercise 1, 13-29 exercise 2, 30-52 exercise 3.
+- Default (`params.yaml`): exercise 1, MAV / RMS / WL, 20 Hz high-pass + 50 Hz notch (no low-pass below Nyquist),
+  train on repetitions 1-4, test on 5 and 6 (the split of the notebook baseline in `notebooks/01-05`).
+
+### NinaPro DB2 (`configs/ninapro_db2.yaml`)
 
 [NinaPro DB2](https://ninapro.hevs.ch/instructions/DB2.html), converted by `scripts/fetch_ninapro.py`:
 
@@ -100,9 +123,9 @@ needs a reader in `READERS` of `src/dataset.py`.
 
 ## Decoders
 
-`decoder.name` is `lda` (our numpy LDA in `src/classifier.py`, with `adapt` for calibration), an alias of
-`src/decoders.py` (`sklearn_lda`, `qda`, `logreg`, `svm`, `linear_svm`, `knn`, `random_forest`, `extra_trees`,
-`gradient_boosting`, `mlp`) or any dotted class path. `decoder.params` are passed to the constructor:
+`decoder.name` is `lda` (our numpy LDA in `src/classifier.py`, with `adapt` for calibration), one of the NN decoders
+below, an alias of `src/decoders.py` (`sklearn_lda`, `qda`, `logreg`, `svm`, `linear_svm`, `knn`, `random_forest`,
+`extra_trees`, `gradient_boosting`, `sklearn_mlp`) or any dotted class path. `decoder.params` are passed to the constructor:
 
 ```yaml
 decoder:
@@ -112,6 +135,22 @@ decoder:
 
 The only interface needed is `fit(X, y)`, `predict_proba(X)` and `classes_`. Classifiers without `predict_proba`
 are wrapped in `CalibratedClassifierCV`.
+
+### NN decoders
+
+`src/nn.py`, trained with torch (`pip install -e ".[nn]"`), with numpy inference from the exported weights (a profile
+loads and runs without torch). Training: AdamW, class-balanced cross-entropy, early stopping on held-out contiguous
+2 s blocks of each class. `adapt` (calibration of the `loso` regime) is cheap for all of them.
+
+| name        | input                       | model                                              | `adapt`                    |
+|-------------|-----------------------------|----------------------------------------------------|----------------------------|
+| `mlp`       | features                    | hidden layers (`hidden: [128, 128]`)               | fine-tunes the output layer |
+| `lda_stack` | features                    | MLP on [out-of-fold LDA log-posteriors, features]  | fine-tunes the MLP's output layer (the LDA stays) |
+| `nn_lda`    | features                    | MLP encoder (`hidden: [128, 32]`) -> LDA head      | `LDA.adapt` on the embedding |
+| `cnn`       | `features.names: [RAW]`     | Conv1d x 3 -> mean over time -> linear (`channels` required) | fine-tunes the output layer |
+
+`device: cpu | cuda | mps | auto` sets where training runs (`cnn` defaults to `auto`: about 25x faster on an Apple
+GPU than on its CPU). Notebooks `11`-`14` run each decoder in every regime, `15_compare` puts them side by side.
 
 ## Adding a feature
 
