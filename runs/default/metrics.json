@@ -1,5 +1,5 @@
 {
-  "config_hash": "e82add6ddd97",
+  "config_hash": "002290574ba5",
   "decoder": "lda",
   "regime": "per_user",
   "normalize": "user",
@@ -86,7 +86,7 @@
   },
   "bad_channels": 0,
   "latency_us": {
-    "features": 66.33347948081791,
-    "decoder": 7.291964720934629
+    "features": 65.18748705275357,
+    "decoder": 7.1249669417738914
   }
 }

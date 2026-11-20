@@ -4,6 +4,35 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
 
+def repetitions(labels, rest=0):
+    """Per sample: the repetition of the last movement onset, each class's onsets numbered 1, 2, ... in order. The
+    rest (and unlabeled samples) after a movement belong to its repetition, before the first onset to repetition 1."""
+    labels = np.asarray(labels)
+    moving = (labels != rest) & (labels >= 0)
+    onsets = np.flatnonzero(moving & np.r_[True, labels[1:] != labels[:-1]])
+    trial = np.ones(len(labels), dtype=np.int64)
+    count = {}
+    for start, stop in zip(onsets, [*onsets[1:], len(labels)][: len(onsets)], strict=True):
+        count[labels[start]] = count.get(labels[start], 0) + 1
+        trial[start:stop] = count[labels[start]]
+    return trial
+
+
+def from_end(trial, labels, recordings, rest=0):
+    """Per window: 1 for the last repetition of its class in its recording group, 2 for the one before... Rest windows
+    take the value of the movement repetition they follow. Lets `evaluation.test: {trial_from_end: [1, 2]}` hold out
+    the last two repetitions of every dataset, whatever their number."""
+    out = np.zeros(len(trial), dtype=np.int64)
+    for group in np.unique(recordings):
+        g = recordings == group
+        moving = g & (labels != rest)
+        last = {c: trial[moving & (labels == c)].max() for c in np.unique(labels[moving])}
+        out[moving] = [last[c] - t + 1 for c, t in zip(labels[moving], trial[moving], strict=True)]
+        top = max(last.values()) if last else 1
+        out[g & (labels == rest)] = top - trial[g & (labels == rest)] + 1
+    return out
+
+
 def label_windows(labels, end_samples, length, fs, cfg, trial=None):
     """-> labels [W], keep mask [W] (pure enough, inside one trial), trial per window [W] (or None)."""
     labels = np.asarray(labels)

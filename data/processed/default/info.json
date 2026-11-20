@@ -54,7 +54,8 @@
     "subject",
     "exercise",
     "trial",
-    "recording"
+    "recording",
+    "trial_from_end"
   ],
   "label_names": [
     "rest",
@@ -111,6 +112,7 @@
     "m51",
     "m52"
   ],
+  "meta_names": {},
   "channel_names": [
     "emg_1",
     "emg_2",

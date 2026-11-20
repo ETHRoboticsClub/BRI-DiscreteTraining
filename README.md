@@ -18,7 +18,7 @@ python scripts/fetch_ninapro.py --db 5 --subjects 1-10 --exercises 1   # or dvc 
 
 ```
 params.yaml                  all parameters, one section per module (NinaPro DB5, 200 Hz)
-configs/                     other datasets, e.g. ninapro_db2.yaml (2 kHz), passed with --params
+configs/                     other datasets, passed with --params: ninapro_db2.yaml (2 kHz), femg.yaml (below)
 dvc.yaml                     pipeline: build_features -> train
 scripts/
   fetch_ninapro.py           NinaPro DB2 / DB5 -> data/raw/ninapro_db<n> (recording format below)
@@ -32,7 +32,7 @@ src/
   normalization.py           identity / z-score, fitted on calibration or training data    (shared)
   pipeline.py                Pipeline, Recording, FeatureBatch                             (shared)
   signal_quality.py          saturation, flatline, power-line ratio, SNR -> ok/warning/bad (shared)
-  dataset.py                 file reader -> Recording                                      (offline)
+  dataset.py                 file readers (npz, femg) -> Recording                         (offline)
   labeling.py                per-sample labels -> one label per window + keep mask         (offline, calibration)
   evaluation.py              splits, metrics, robustness, calibration effort               (offline)
   classifier.py              shrinkage LDA with calibration adaptation, numpy only         (Group 3)
@@ -95,6 +95,27 @@ needs a reader in `READERS` of `src/dataset.py`.
 - `labels`: `restimulus` offset per exercise, 0 = rest, 1-12 exercise 1, 13-29 exercise 2, 30-52 exercise 3.
 - Default (`params.yaml`): exercise 1, MAV / RMS / WL, 20 Hz high-pass + 50 Hz notch (no low-pass below Nyquist),
   train on repetitions 1-4, test on 5 and 6 (the split of the notebook baseline in `notebooks/01-05`).
+
+### BRI-ForearmEMGWorldModelDataset (`configs/femg.yaml`)
+
+The processed tree of [the dataset repo](https://github.com/ETHRoboticsClub/BRI-ForearmEMGWorldModelDataset): every
+dataset on one virtual band of 8 electrodes at 200 Hz, normalized per channel, labels as shared gestures.
+
+```bash
+dvc import git@github.com:ETHRoboticsClub/BRI-ForearmEMGWorldModelDataset data/processed -o data/forearm
+python scripts/build_features.py --params configs/femg.yaml && python scripts/train.py --params configs/femg.yaml
+```
+
+- Reader `femg` (`src/dataset.py`): `<dataset>/<subject>/<session>/{virtual,gesture,stimulus}.npy` + `meta.json`. The
+  labels (at `label_fs`) are repeated to the EMG rate; `-1` (no cue, or a cue outside the shared vocabulary) is never
+  a class, its windows are dropped. One `Recording` per segment, so the filter restarts and no window spans two.
+- `dataset.label_level`: `gesture` (shared ids, `gesture.npy`), `family` (coarse classes, merges near matches across
+  datasets) or `stimulus` (a dataset's own cue ids, for one dataset or sessions built before `gesture.npy`).
+- `dataset.where` takes names: `{dataset: [ninapro_db5, grabmyo], subject: [ninapro_db5/s01]}`. The integer ids in
+  `columns.npy` are the positions of the sorted names; `info.json` `meta_names` maps them back.
+- No repetition ids in the files: `trial` numbers each gesture's runs in order (rest after a movement belongs to its
+  repetition). `trial_from_end` (every reader) counts from the last one, so `evaluation.test: {trial_from_end: [1, 2]}`
+  holds out the last two repetitions of every dataset, whatever their number.
 
 ### NinaPro DB2 (`configs/ninapro_db2.yaml`)
 

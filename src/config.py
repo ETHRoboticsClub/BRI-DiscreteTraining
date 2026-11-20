@@ -25,6 +25,7 @@ class DatasetConfig:
     where: dict | None = None  # selection of recordings, e.g. {subject: [1, 2]}
     classes: list | None = None  # class IDs to keep, None = all
     rest_class: int = 0
+    label_level: str = "gesture"  # femg: gesture (shared ids) | family (coarse classes) | stimulus (native cues)
     user_key: str | None = "subject"  # one σ_rest, normalization and decoder per value (calibration profile)
     chunk_seconds: float = 10.0  # offline recordings are streamed through the pipeline in chunks of this length
 
@@ -191,6 +192,12 @@ def validate(cfg):
     missing = [n for n in feat.names if n not in REGISTRY]
     if missing:
         errors.append(f"features.names: unknown {missing}, available: {sorted(REGISTRY)}")
+    from src.dataset import READERS
+
+    if cfg.dataset.reader not in READERS:
+        errors.append(f"dataset.reader must be one of {sorted(READERS)}, not {cfg.dataset.reader}")
+    if cfg.dataset.label_level not in ("gesture", "family", "stimulus"):
+        errors.append(f"dataset.label_level must be gesture, family or stimulus, not {cfg.dataset.label_level}")
     if cfg.normalization.method not in ("identity", "zscore"):
         errors.append(f"normalization.method must be identity or zscore, not {cfg.normalization.method}")
     if cfg.labeling.strategy not in ("last", "majority", "centre"):

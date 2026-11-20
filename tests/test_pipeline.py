@@ -241,3 +241,94 @@ def test_raw_feature_and_validation_blocks():
     val = validation_blocks(t, 0.25, block=40)
     assert val.sum() == 160 and all(val[t == c].sum() == 80 for c in (0, 1))  # blocks 3 and 7 of 10 per class
     assert (np.diff(np.flatnonzero(val)[:40]) == 1).all()  # contiguous blocks
+
+
+def write_femg_session(root, dataset, subject, session, rng, reps=4, seconds=1.0, fs=200, label_fs=100):
+    """A processed session of the dataset repo: rest / gesture blocks, two segments, unlabeled frames at the start."""
+    patterns = rng.uniform(0.2, 1, (3, 8))
+    patterns[0] = 0.05
+    frames = []
+    for _ in range(reps):
+        for g in (1, 2):
+            frames += [0] * int(label_fs * seconds) + [g] * int(label_fs * seconds)
+    frames = np.array([-1] * 20 + frames)
+    labels = np.repeat(frames.clip(min=0), fs // label_fs)
+    emg = (patterns[labels] * rng.standard_normal((len(labels), 8))).astype(np.float32)
+    folder = root / dataset / subject / session
+    folder.mkdir(parents=True)
+    np.save(folder / "virtual.npy", emg)
+    np.save(folder / "stimulus.npy", np.where(frames > 0, frames + 10, frames).astype(np.int16))  # native cue ids
+    np.save(folder / "gesture.npy", frames.astype(np.int16))
+    half = len(frames) // 2
+    meta = {
+        "dataset": dataset,
+        "subject": f"{dataset}/{subject}",
+        "session": session,
+        "fs": fs,
+        "label_fs": label_fs,
+        "segments": [[0, half], [half, len(frames)]],
+        "gesture_names": ["rest", "fist", "pinch"],
+        "gesture_families": ["rest", "hand_posture", "precision"],
+    }
+    (folder / "meta.json").write_text(json.dumps(meta))
+    return frames
+
+
+def femg_config(root, **dataset):
+    params = yaml.safe_load((ROOT / "configs" / "femg.yaml").read_text())
+    params["dataset"].update(raw_dir=str(root), **dataset)
+    return from_dict(params)
+
+
+def test_femg_reader(tmp_path):
+    from src.dataset import load_recordings
+
+    rng = np.random.default_rng(0)
+    write_femg_session(tmp_path, "ds_a", "s01", "A1", rng)
+    write_femg_session(tmp_path, "ds_b", "s01", "A1", rng)
+    recs = list(load_recordings(femg_config(tmp_path)))
+    assert len(recs) == 4  # 2 sessions x 2 segments
+    assert {r.names["subject"] for r in recs} == {"ds_a/s01", "ds_b/s01"}
+    assert recs[0].meta["subject"] != recs[2].meta["subject"]
+    first, second = recs[0], recs[1]
+    assert first.signal.shape[0] == 8 and first.label_names == ["rest", "fist", "pinch"]
+    assert (first.labels[:40] == -1).all() and set(first.labels[40:]) == {0, 1, 2}
+    assert first.signal.shape[1] + second.signal.shape[1] == 2 * (20 + 4 * 2 * 200)
+    assert second.trial.max() == 4  # repetitions continue across the segments of a session
+
+    only_b = list(load_recordings(femg_config(tmp_path, where={"dataset": ["ds_b"]})))
+    assert {r.names["dataset"] for r in only_b} == {"ds_b"}
+    fam = next(iter(load_recordings(femg_config(tmp_path, label_level="family"))))
+    assert fam.label_names == ["rest", "hand_posture", "precision"]
+    stim = next(iter(load_recordings(femg_config(tmp_path, label_level="stimulus"))))
+    assert set(stim.labels) == {-1, 0, 11, 12} and stim.label_names is None
+
+
+def test_femg_build_drops_unlabeled_and_holds_out_last_reps(tmp_path):
+    rng = np.random.default_rng(1)
+    raw = tmp_path / "forearm"
+    for s in ("s01", "s02"):
+        write_femg_session(raw, "ds_a", s, "A1", rng)
+    params = yaml.safe_load((ROOT / "configs" / "femg.yaml").read_text())
+    params["dataset"].update(raw_dir=str(raw), out_dir=str(tmp_path / "features"))
+    params["evaluation"].update(out_dir=str(tmp_path / "runs"), calibration_seconds=[0.5])
+    (tmp_path / "params.yaml").write_text(yaml.safe_dump(params))
+    env = {"PYTHONPATH": str(ROOT)}
+    for script in ("build_features.py", "train.py"):
+        subprocess.run([sys.executable, ROOT / "scripts" / script], cwd=tmp_path, env=env, check=True)
+    info = json.loads((tmp_path / "features" / "info.json").read_text())
+    columns, y = np.load(tmp_path / "features" / "columns.npy"), np.load(tmp_path / "features" / "labels.npy")
+    trial, last = columns[:, info["columns"].index("trial")], columns[:, info["columns"].index("trial_from_end")]
+    assert y.min() >= 0 and set(np.unique(y)) == {0, 1, 2}
+    assert np.array_equal(np.isin(trial, [3, 4]), np.isin(last, [1, 2]))
+    assert info["meta_names"]["subject"] == {"0": "ds_a/s01", "1": "ds_a/s02"}
+    metrics = json.loads((tmp_path / "runs" / "metrics.json").read_text())
+    assert metrics["test"]["balanced_accuracy"] > 0.8
+
+
+def test_repetitions():
+    from src.labeling import repetitions
+
+    assert repetitions(np.zeros(3, dtype=int)).tolist() == [1, 1, 1]
+    labels = np.array([0, 1, 1, 0, 2, 0, 1, 0, 2, 2])
+    assert repetitions(labels).tolist() == [1, 1, 1, 1, 1, 1, 2, 2, 2, 2]

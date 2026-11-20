@@ -22,6 +22,7 @@ class Recording:
     meta: dict = field(default_factory=dict)  # subject, session, conditions...
     label_names: list | None = None  # label_names[class ID]
     config_hash: str | None = None
+    names: dict = field(default_factory=dict)  # names of the meta ids (femg: dataset, subject, session)
 
     def __post_init__(self):
         if self.timestamps is None:
